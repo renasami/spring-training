@@ -13,8 +13,8 @@ if __name__ == "__main__":
  
     # サンプルユーザ(admin)を作成
     admin = User(username='admin', password='fastapi', mail='hoge@example.com')
-    db.session.add(admin)  # 追加
-    db.session.commit()  # データベースにコミット
+    # db.session.add(admin)  # 追加
+    # db.session.commit()  # データベースにコミット
  
     # サンプルタスク
     task = Task(
@@ -22,8 +22,9 @@ if __name__ == "__main__":
         content='〇〇の締め切り',
         deadline=datetime(2019, 12, 25, 12, 00, 00),
     )
-    print(task)
-    db.session.add(task)
-    db.session.commit()
+    # print(task)
+    # db.session.add(task)
+    # db.session.commit()
+    print(db.session.query(User).all())
  
     db.session.close() 

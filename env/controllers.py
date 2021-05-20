@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
 import hashlib  # new
+import logging
 import re
+from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException  # new
 from fastapi.security import HTTPBasic, HTTPBasicCredentials  # new
 from starlette.requests import Request
+from starlette.responses import RedirectResponse
 from starlette.status import HTTP_401_UNAUTHORIZED  # new
 from starlette.templating import Jinja2Templates
 
 import db  # new
+from auth import auth
 from models import Task, User  # new
+from mycalender import MyCalendar
 
 app = FastAPI(
     title='FastAPIでつくるtoDoアプリケーション',
@@ -29,29 +34,47 @@ def index(request: Request):
 security = HTTPBasic() 
 def admin(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
     # Basic認証で受け取った情報
-    username = credentials.username
+    username = auth(credentials)
     password = hashlib.md5(credentials.password.encode()).hexdigest()
+
+    """ [new] 今日の日付と来週の日付"""
+    today = datetime.now()
+    next_w = today + timedelta(days=7)  # １週間後の日付
 
     # データベースからユーザ名が一致するデータを取得
     user = db.session.query(User).filter(User.username == username).first()
-    task = db.session.query(Task).filter(
-        Task.user_id == user.id).all() if user is not None else []
+    task = db.session.query(Task).filter(Task.user_id == user.id).all()
     db.session.close()
+    
 
     # 該当ユーザがいない場合
     if user is None or user.password != password:
-        error = 'ユーザ名かパスワードが間違っています'
+        error = 'ユーザ名かパスワードが間違っています．'
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail=error,
             headers={"WWW-Authenticate": "Basic"},
         )
 
-    # 特に問題がなければ管理者ページへ
+    
+
+    """ [new] カレンダー関連 """
+    # カレンダーをHTML形式で取得
+    cal = MyCalendar(username,
+                     {t.deadline.strftime('%Y%m%d'): t.done for t in task})  # 予定がある日付をキーとして渡す
+
+    cal = cal.formatyear(today.year, 4)  # カレンダーをHTMLで取得
+
+    # 直近のタスクだけでいいので、リストを書き換える
+    task = [t for t in task if today <= t.deadline <= next_w]
+    links = [t.deadline.strftime('/todo/'+username+'/%Y/%m/%d') for t in task]  # 直近の予定リンク
+
     return templates.TemplateResponse('admin.html',
                                       {'request': request,
                                        'user': user,
-                                       'task': task})
+                                       'task': task,
+                                       'links': links,
+                                       'calender': cal})
 
 
 pattern = re.compile(r'\w{4,20}')  # 任意の4~20の英数字を示す正規表現
@@ -104,7 +127,102 @@ async def register(request: Request):
         db.session.add(user)
         db.session.commit()
         db.session.close()
+        
 
         return templates.TemplateResponse('complete.html',
                                           {'request': request,
                                            'username': username})
+
+def detail(request: Request, username, year, month, day, credentials: HTTPBasicCredentials = Depends(security)):
+    """ URLパターンは引数で取得可能 """
+    username_temp = auth(credentials)
+
+    if username_temp != username:
+        return RedirectResponse('/')
+
+    user = db.session.query(User).filter(User.username == username).first()
+    task = db.session.query(Task).filter(Task.user_id == user.id).all()
+
+    theday = '{}{}{}'.format(year,month.zfill(2),day.zfill(2))
+    task = [t for t in task if t.deadline.strftime('%Y%m%d') == theday]
+
+    return templates.TemplateResponse('detail.html',
+                                      {'request': request,
+                                       'username': username,
+                                       'task':task,
+                                       'year': year,
+                                       'month': month,
+                                       'day': day})
+
+# controllers.py
+async def done(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
+    # 認証OK？
+    username = auth(credentials)
+
+    # ユーザ情報を取得
+    user = db.session.query(User).filter(User.username == username).first()
+
+    # ログインユーザのタスクを取得
+    task = db.session.query(Task).filter(Task.user_id == user.id).all()
+
+    # フォームで受け取ったタスクの終了判定を見て内容を変更する
+    data = await request.form()
+    t_dones = data.getlist('done[]')  # リストとして取得
+
+    for t in task:
+        if str(t.id) in t_dones:  # もしIDが一致すれば "終了した予定" とする
+            t.done = True
+
+    db.session.commit()  # update!!
+    db.session.close()
+    
+
+    return RedirectResponse('/admin')  # 管理者トップへリダイレクト
+
+async def add(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
+    # 認証
+    username = auth(credentials)
+
+    # ユーザ情報を取得
+    user = db.session.query(User).filter(User.username == username).first()
+    
+    # フォームからデータを取得
+    data = await request.form()
+    year = int(data['year'])
+    month = int(data['month'])
+    day = int(data['day'])
+    hour = int(data['hour'])
+    minute = int(data['minute'])
+    deadline = datetime(year=year, month=month, day=day,
+                        hour=hour, minute=minute)
+
+    # 新しくタスクを生成しコミット
+    task = Task(user.id, data['content'], deadline)
+    db.session.add(task)
+    db.session.commit()
+    db.session.close()
+    
+
+    return RedirectResponse('/admin')
+
+def delete(request: Request, t_id, credentials: HTTPBasicCredentials = Depends(security)):
+    # 認証
+    username = auth(credentials)
+ 
+    # ログインユーザ情報を取得
+    user = db.session.query(User).filter(User.username == username).first()
+ 
+    # 該当タスクを取得
+    task = db.session.query(Task).filter(Task.id == t_id).first()
+ 
+    # もしユーザIDが異なれば削除せずリダイレクト
+    if task.user_id != user.id:
+        return RedirectResponse('/admin')
+ 
+    # 削除してコミット
+    db.session.delete(task)
+    db.session.commit()
+    db.session.close()
+   
+
+    return RedirectResponse('/admin')
